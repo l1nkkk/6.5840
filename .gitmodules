@@ -1,0 +1,3 @@
+[submodule "src/lin_util"]
+	path = src/lin_util
+	url = https://github.com/l1nkkk/lin_util

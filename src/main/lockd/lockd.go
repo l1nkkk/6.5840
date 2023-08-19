@@ -16,7 +16,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/l1nkkk/6.5840/lockservice"
+	"github.com/l1nkkk/6.5840/src/lockservice"
 )
 
 func main() {

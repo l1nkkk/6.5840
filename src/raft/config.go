@@ -8,20 +8,26 @@ package raft
 // test with the original before submitting.
 //
 
-import "6.5840/labgob"
-import "6.5840/labrpc"
-import "bytes"
-import "log"
-import "sync"
-import "sync/atomic"
-import "testing"
-import "runtime"
-import "math/rand"
-import crand "crypto/rand"
-import "math/big"
-import "encoding/base64"
-import "time"
-import "fmt"
+import (
+	"bytes"
+	crand "crypto/rand"
+	"encoding/base64"
+	"fmt"
+	"io"
+	"log"
+	"math/big"
+	"math/rand"
+	"os"
+	"runtime"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/l1nkkk/6.5840/src/labgob"
+	"github.com/l1nkkk/6.5840/src/labrpc"
+	"github.com/l1nkkk/6.5840/src/lin_util/lin_log"
+)
 
 func randstring(n int) string {
 	b := make([]byte, 2*n)
@@ -38,19 +44,19 @@ func makeSeed() int64 {
 }
 
 type config struct {
-	mu          sync.Mutex
-	t           *testing.T
-	finished    int32
-	net         *labrpc.Network
-	n           int
-	rafts       []*Raft
-	applyErr    []string // from apply channel readers
-	connected   []bool   // whether each server is on the net
-	saved       []*Persister
-	endnames    [][]string            // the port file names each sends to
+	mu          sync.Mutex            // mutex
+	t           *testing.T            // testing.T
+	finished    int32                 // ?
+	net         *labrpc.Network       // rpc object
+	n           int                   // [l1nkkk] the number of server?
+	rafts       []*Raft               // raft object
+	applyErr    []string              // from apply channel readers
+	connected   []bool                // whether each server is on the net
+	saved       []*Persister          // [l1nkkk] Persister, mock disk?
+	endnames    [][]string            // [l1nkkk] the port file names each sends to, endnames[i][j] 服务i和服务j之间的port file name
 	logs        []map[int]interface{} // copy of each server's committed entries
-	lastApplied []int
-	start       time.Time // time at which make_config() was called
+	lastApplied []int                 // [l1nkkk]store the last applied num of every serve?
+	start       time.Time             // time at which make_config() was called
 	// begin()/end() statistics
 	t0        time.Time // time at which test_test.go called cfg.begin()
 	rpcs0     int       // rpcTotal() at start of test
@@ -62,7 +68,14 @@ type config struct {
 
 var ncpu_once sync.Once
 
+// make_config initialize config, [n] 服务数 , [unreliable] 是否不稳定的网络，[snapshot] 是否支持快照
 func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
+	logFile, err := os.OpenFile("/Users/l1nkkk/project/go/6.5840/log/log.txt", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		log.Fatal("error: open file", err)
+	}
+	lin_log.Init(lin_log.DebugLevel, []io.Writer{os.Stderr, logFile}, nil)
+	lin_log.Info("[Start]-------------------------------")
 	ncpu_once.Do(func() {
 		if runtime.NumCPU() < 2 {
 			fmt.Printf("warning: only one CPU, which may conceal locking bugs\n")
@@ -70,6 +83,7 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 		rand.Seed(makeSeed())
 	})
 	runtime.GOMAXPROCS(4)
+	// [l1nkkk] init
 	cfg := &config{}
 	cfg.t = t
 	cfg.net = labrpc.MakeNetwork()
@@ -83,14 +97,15 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	cfg.lastApplied = make([]int, cfg.n)
 	cfg.start = time.Now()
 
+	// [l1nkkk] set net param，将mock network设置为不稳定态
 	cfg.setunreliable(unreliable)
-
 	cfg.net.LongDelays(true)
 
 	applier := cfg.applier
 	if snapshot {
 		applier = cfg.applierSnap
 	}
+
 	// create a full set of Rafts.
 	for i := 0; i < cfg.n; i++ {
 		cfg.logs[i] = map[int]interface{}{}
@@ -105,22 +120,26 @@ func make_config(t *testing.T, n int, unreliable bool, snapshot bool) *config {
 	return cfg
 }
 
-// shut down a Raft server but save its persistent state.
+// crash1 shut down a Raft server but save its persistent state.
 func (cfg *config) crash1(i int) {
+	// 1. disconnect the network with others
 	cfg.disconnect(i)
 	cfg.net.DeleteServer(i) // disable client connections to the server.
 
 	cfg.mu.Lock()
 	defer cfg.mu.Unlock()
 
+	// 2. presist（lock） the state to prevent for continuing to update, 深拷贝Persister
 	// a fresh persister, in case old instance
 	// continues to update the Persister.
 	// but copy old persister's content so that we always
 	// pass Make() the last persisted state.
+	// [l1nkkk] 防止旧的instance继续更新，这里的mock持久化锁住当前状态
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 	}
 
+	// 3. kill raft
 	rf := cfg.rafts[i]
 	if rf != nil {
 		cfg.mu.Unlock()
@@ -129,6 +148,7 @@ func (cfg *config) crash1(i int) {
 		cfg.rafts[i] = nil
 	}
 
+	// 4. 深拷贝Persister里的RaftState，Snapshot
 	if cfg.saved[i] != nil {
 		raftlog := cfg.saved[i].ReadRaftState()
 		snapshot := cfg.saved[i].ReadSnapshot()
@@ -265,7 +285,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 	}
 }
 
-// start or re-start a Raft.
+// start1 start or re-start a Raft. [i] 指定某个raft，applier apply的回调函数；
 // if one already exists, "kill" it first.
 // allocate new outgoing port file names, and a new
 // state persister, to isolate previous instance of
@@ -273,6 +293,7 @@ func (cfg *config) applierSnap(i int, applyCh chan ApplyMsg) {
 func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	cfg.crash1(i)
 
+	// 1. [Mock net]生成 i -> j 之间的rpc call connect，i is client, j is server
 	// a fresh set of outgoing ClientEnd names.
 	// so that old crashed instance's ClientEnds can't send.
 	cfg.endnames[i] = make([]string, cfg.n)
@@ -291,6 +312,7 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 
 	cfg.lastApplied[i] = 0
 
+	// 2. [Mock disk] 生成持久化对象
 	// a fresh persister, so old instance doesn't overwrite
 	// new instance's persisted state.
 	// but copy old persister's content so that we always
@@ -298,6 +320,7 @@ func (cfg *config) start1(i int, applier func(int, chan ApplyMsg)) {
 	if cfg.saved[i] != nil {
 		cfg.saved[i] = cfg.saved[i].Copy()
 
+		// [WIP]
 		snapshot := cfg.saved[i].ReadSnapshot()
 		if snapshot != nil && len(snapshot) > 0 {
 			// mimic KV server and process snapshot now.
@@ -352,7 +375,7 @@ func (cfg *config) cleanup() {
 	cfg.checkTimeout()
 }
 
-// attach server i to the net.
+// connect attach server i to the net.
 func (cfg *config) connect(i int) {
 	// fmt.Printf("connect(%d)\n", i)
 
@@ -375,12 +398,14 @@ func (cfg *config) connect(i int) {
 	}
 }
 
+// disconnect 切断 server i与其他服务的网络
 // detach server i from the net.
 func (cfg *config) disconnect(i int) {
 	// fmt.Printf("disconnect(%d)\n", i)
 
 	cfg.connected[i] = false
 
+	// disconnect out edge
 	// outgoing ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.endnames[i] != nil {
@@ -389,6 +414,7 @@ func (cfg *config) disconnect(i int) {
 		}
 	}
 
+	// disconnect in edge
 	// incoming ClientEnds
 	for j := 0; j < cfg.n; j++ {
 		if cfg.endnames[j] != nil {
@@ -418,6 +444,7 @@ func (cfg *config) setlongreordering(longrel bool) {
 	cfg.net.LongReordering(longrel)
 }
 
+// checkOneLeader 检查leader合法性，并返回最后term的leader
 // check that one of the connected servers thinks
 // it is the leader, and that no other connected
 // server thinks otherwise.
@@ -428,6 +455,7 @@ func (cfg *config) checkOneLeader() int {
 		ms := 450 + (rand.Int63() % 100)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 
+		// 1. 遍历每个raft，获取其记录的term和leader
 		leaders := make(map[int][]int)
 		for i := 0; i < cfg.n; i++ {
 			if cfg.connected[i] {
@@ -436,7 +464,7 @@ func (cfg *config) checkOneLeader() int {
 				}
 			}
 		}
-
+		// 2. 判断是否有同个term有多个leader被记录的情况，有则报错
 		lastTermWithLeader := -1
 		for term, leaders := range leaders {
 			if len(leaders) > 1 {
@@ -455,6 +483,7 @@ func (cfg *config) checkOneLeader() int {
 	return -1
 }
 
+// 检查所有的raft对象是否都在同一个term
 // check that everyone agrees on the term.
 func (cfg *config) checkTerms() int {
 	term := -1

@@ -1,9 +1,11 @@
 package kvraft
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"github.com/l1nkkk/6.5840/src/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd

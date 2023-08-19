@@ -49,15 +49,29 @@ package labrpc
 //   pass svc to srv.AddService()
 //
 
-import "6.5840/labgob"
-import "bytes"
-import "reflect"
-import "sync"
-import "log"
-import "strings"
-import "math/rand"
-import "time"
-import "sync/atomic"
+// [l1nkkk]
+// labgob-encoded 相当于该项目中的序列化，让RPCs之间不依赖对象进行交互
+// net := MakeNetwork() -- holds network, clients, servers.
+// end := net.MakeEnd(endname) -- create a client end-point, to talk to one server.
+// net.AddServer(servername, server) -- adds a named server to network.
+// net.DeleteServer(servername) -- eliminate the named server.
+// net.Connect(endname, servername) -- connect a client to a server.
+// net.Enable(endname, enabled) -- enable/disable a client.
+// net.Reliable(bool) -- false means drop/delay messages
+// RPC 调用: end.Call("Raft.AppendEntries", &args, &reply) -- send an RPC, wait for reply.
+
+import (
+	"bytes"
+	"log"
+	"math/rand"
+	"reflect"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/l1nkkk/6.5840/src/labgob"
+)
 
 type reqMsg struct {
 	endname  interface{} // name of sending ClientEnd
@@ -72,22 +86,25 @@ type replyMsg struct {
 	reply []byte
 }
 
+// ClientEnd 客户端调用RPC的管理对象
 type ClientEnd struct {
 	endname interface{}   // this end-point's name
-	ch      chan reqMsg   // copy of Network.endCh
-	done    chan struct{} // closed when Network is cleaned up
+	ch      chan reqMsg   // copy of Network.endCh，RPC发送的请求reqMsg，将push进去
+	done    chan struct{} // closed when Network is cleaned up，如果netawork被close，则close该chan，意味着select的时候总是第一时间触发
 }
 
 // send an RPC, wait for the reply.
 // the return value indicates success; false means that
 // no reply was received from the server.
 func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bool {
+	// [l1nkkk] init request
 	req := reqMsg{}
 	req.endname = e.endname
 	req.svcMeth = svcMeth
 	req.argsType = reflect.TypeOf(args)
 	req.replyCh = make(chan replyMsg)
 
+	// [l1nkkk] serialize args
 	qb := new(bytes.Buffer)
 	qe := labgob.NewEncoder(qb)
 	if err := qe.Encode(args); err != nil {
@@ -98,6 +115,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	//
 	// send the request.
 	//
+	// [l1nkkk] [Question] 这里并不代表e.done被close时，第一时间触发case <-e.done呀
 	select {
 	case e.ch <- req:
 		// the request has been sent.
@@ -109,6 +127,7 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	//
 	// wait for the reply.
 	//
+	// [l1nkkk] deserialize response data
 	rep := <-req.replyCh
 	if rep.ok {
 		rb := bytes.NewBuffer(rep.reply)
@@ -122,19 +141,25 @@ func (e *ClientEnd) Call(svcMeth string, args interface{}, reply interface{}) bo
 	}
 }
 
+// Network 一个模拟network的对象
 type Network struct {
-	mu             sync.Mutex
-	reliable       bool
-	longDelays     bool                        // pause a long time on send on disabled connection
-	longReordering bool                        // sometimes delay replies a long time
-	ends           map[interface{}]*ClientEnd  // ends, by name
-	enabled        map[interface{}]bool        // by end name
-	servers        map[interface{}]*Server     // servers, by name
-	connections    map[interface{}]interface{} // endname -> servername
-	endCh          chan reqMsg
-	done           chan struct{} // closed when Network is cleaned up
-	count          int32         // total RPC count, for statistics
-	bytes          int64         // total bytes send, for statistics
+	mu sync.Mutex
+	// 如果reliable为false，
+	// req: 设置延迟，设置1/10概率的 drop request
+	// resp: 设置1/10概率的 drop resp
+	// 如果longreordering为true，在resp的时候设置2/3概率的延迟
+	// 如果longDelays为true，当clientEnd或server不可用时，存在长延迟（最大7s）
+	reliable       bool                        // [l1nkkk][action]
+	longDelays     bool                        // [l1nkkk][action]pause a long time on send on disabled connection
+	longReordering bool                        // [l1nkkk][action]sometimes delay replies a long time
+	ends           map[interface{}]*ClientEnd  // [l1nkkk] endName -> client end object
+	enabled        map[interface{}]bool        // [l1nkkk] endName -> is enable
+	servers        map[interface{}]*Server     // [l1nkkk] serviceName -> server object
+	connections    map[interface{}]interface{} // [l1nkkk] endname -> servername
+	endCh          chan reqMsg                 // [l1nkkk] clientEnd 投递msg的channel
+	done           chan struct{}               // [l1nkkk] 当网络清理后，close该chan
+	count          int32                       // [l1nkkk] 全部RPC的数据量，for statistics
+	bytes          int64                       // [l1nkkk] total bytes send, for statistics
 }
 
 func MakeNetwork() *Network {
@@ -164,10 +189,12 @@ func MakeNetwork() *Network {
 	return rn
 }
 
+// Cleanup close the rn.done chan
 func (rn *Network) Cleanup() {
 	close(rn.done)
 }
 
+// Reliable set rn.reliable
 func (rn *Network) Reliable(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -175,6 +202,7 @@ func (rn *Network) Reliable(yes bool) {
 	rn.reliable = yes
 }
 
+// LongReordering set rn.longReordering
 func (rn *Network) LongReordering(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -182,6 +210,7 @@ func (rn *Network) LongReordering(yes bool) {
 	rn.longReordering = yes
 }
 
+// LongDelays set rn.longDelays
 func (rn *Network) LongDelays(yes bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -189,6 +218,7 @@ func (rn *Network) LongDelays(yes bool) {
 	rn.longDelays = yes
 }
 
+// readEndnameInfo 返回处理此次rpc所需network info
 func (rn *Network) readEndnameInfo(endname interface{}) (enabled bool,
 	servername interface{}, server *Server, reliable bool, longreordering bool,
 ) {
@@ -205,6 +235,7 @@ func (rn *Network) readEndnameInfo(endname interface{}) (enabled bool,
 	return
 }
 
+// isServerDead 是否服务已经dead，当client或server某一个dead的时候，返回true
 func (rn *Network) isServerDead(endname interface{}, servername interface{}, server *Server) bool {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -215,10 +246,12 @@ func (rn *Network) isServerDead(endname interface{}, servername interface{}, ser
 	return false
 }
 
+// processReq 处理RPC request
 func (rn *Network) processReq(req reqMsg) {
 	enabled, servername, server, reliable, longreordering := rn.readEndnameInfo(req.endname)
 
 	if enabled && servername != nil && server != nil {
+
 		if reliable == false {
 			// short delay
 			ms := (rand.Int() % 27)
@@ -235,6 +268,7 @@ func (rn *Network) processReq(req reqMsg) {
 		// in a separate thread so that we can periodically check
 		// if the server has been killed and the RPC should get a
 		// failure reply.
+		// [l1nkkk] 在server处理request的时候，仍然可能被kill
 		ech := make(chan replyMsg)
 		go func() {
 			r := server.dispatch(req)
@@ -255,6 +289,7 @@ func (rn *Network) processReq(req reqMsg) {
 				serverDead = rn.isServerDead(req.endname, servername, server)
 				if serverDead {
 					go func() {
+						// [l1nkkk] 避免前面goroutine中，ech <- r死锁
 						<-ech // drain channel to let the goroutine created earlier terminate
 					}()
 				}
@@ -308,7 +343,7 @@ func (rn *Network) processReq(req reqMsg) {
 
 }
 
-// create a client end-point.
+// MakeEnd create a client end-point.
 // start the thread that listens and delivers.
 func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	rn.mu.Lock()
@@ -329,6 +364,7 @@ func (rn *Network) MakeEnd(endname interface{}) *ClientEnd {
 	return e
 }
 
+// AddServer add a server to network obj(update meta)
 func (rn *Network) AddServer(servername interface{}, rs *Server) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -336,6 +372,7 @@ func (rn *Network) AddServer(servername interface{}, rs *Server) {
 	rn.servers[servername] = rs
 }
 
+// DeleteServer delete server from network(update meta)
 func (rn *Network) DeleteServer(servername interface{}) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -343,7 +380,7 @@ func (rn *Network) DeleteServer(servername interface{}) {
 	rn.servers[servername] = nil
 }
 
-// connect a ClientEnd to a server.
+// Connect a ClientEnd to a server.
 // a ClientEnd can only be connected once in its lifetime.
 func (rn *Network) Connect(endname interface{}, servername interface{}) {
 	rn.mu.Lock()
@@ -352,7 +389,7 @@ func (rn *Network) Connect(endname interface{}, servername interface{}) {
 	rn.connections[endname] = servername
 }
 
-// enable/disable a ClientEnd.
+// Enable return enable/disable for a ClientEnd.
 func (rn *Network) Enable(endname interface{}, enabled bool) {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -360,7 +397,7 @@ func (rn *Network) Enable(endname interface{}, enabled bool) {
 	rn.enabled[endname] = enabled
 }
 
-// get a server's count of incoming RPCs.
+// GetCount return  a server's count of incoming RPCs.
 func (rn *Network) GetCount(servername interface{}) int {
 	rn.mu.Lock()
 	defer rn.mu.Unlock()
@@ -369,16 +406,19 @@ func (rn *Network) GetCount(servername interface{}) int {
 	return svr.GetCount()
 }
 
+// GetTotalCount returns rn.count
 func (rn *Network) GetTotalCount() int {
 	x := atomic.LoadInt32(&rn.count)
 	return int(x)
 }
 
+// GetTotalBytes returns rn.bytes
 func (rn *Network) GetTotalBytes() int64 {
 	x := atomic.LoadInt64(&rn.bytes)
 	return x
 }
 
+// Server 多个service(RPC 管理对象)的集合
 // a server is a collection of services, all sharing
 // the same rpc dispatcher. so that e.g. both a Raft
 // and a k/v server can listen to the same rpc endpoint.
@@ -405,6 +445,7 @@ func (rs *Server) dispatch(req reqMsg) replyMsg {
 
 	rs.count += 1
 
+	// serviceName检索对应service， methodName检索对应method
 	// split Raft.AppendEntries into service and method
 	dot := strings.LastIndex(req.svcMeth, ".")
 	serviceName := req.svcMeth[:dot]
@@ -433,6 +474,7 @@ func (rs *Server) GetCount() int {
 	return rs.count
 }
 
+// Service 处理RPC的对象
 // an object with methods that can be called via RPC.
 // a single server may have more than one Service.
 type Service struct {
@@ -442,6 +484,8 @@ type Service struct {
 	methods map[string]reflect.Method
 }
 
+// MakeService obj's methods will handle RPCs
+// 注册RPC
 func MakeService(rcvr interface{}) *Service {
 	svc := &Service{}
 	svc.typ = reflect.TypeOf(rcvr)
@@ -473,6 +517,7 @@ func MakeService(rcvr interface{}) *Service {
 	return svc
 }
 
+// dispatch 处理request，返回resp
 func (svc *Service) dispatch(methname string, req reqMsg) replyMsg {
 	if method, ok := svc.methods[methname]; ok {
 		// prepare space into which to read the argument.

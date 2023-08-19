@@ -8,12 +8,16 @@ package raft
 // test with the original before submitting.
 //
 
-import "testing"
-import "fmt"
-import "time"
-import "math/rand"
-import "sync/atomic"
-import "sync"
+import (
+	"fmt"
+	"math/rand"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/l1nkkk/6.5840/src/lin_util/lin_log"
+)
 
 // The tester generously allows solutions to complete elections in one second
 // (much more than the paper's range of timeouts).
@@ -21,6 +25,7 @@ const RaftElectionTimeout = 1000 * time.Millisecond
 
 func TestInitialElection2A(t *testing.T) {
 	servers := 3
+	// [l1nkkk] cfg相当于pack测试相关的action
 	cfg := make_config(t, servers, false, false)
 	defer cfg.cleanup()
 
@@ -50,6 +55,16 @@ func TestInitialElection2A(t *testing.T) {
 	cfg.end()
 }
 
+// func TestT111(t *testing.T) {
+// 	defer func() {
+// 		if t.Failed() {
+// 			lin_log.Error("[www]")
+// 		}
+// 	}()
+// 	lin_log.Init(lin_log.DebugLevel, nil, nil)
+
+// }
+
 func TestReElection2A(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false, false)
@@ -58,16 +73,19 @@ func TestReElection2A(t *testing.T) {
 	cfg.begin("Test (2A): election after network failure")
 
 	leader1 := cfg.checkOneLeader()
+	lin_log.Info("[TestReElection2A] pass 1")
 
 	// if the leader disconnects, a new one should be elected.
 	cfg.disconnect(leader1)
 	cfg.checkOneLeader()
+	lin_log.Info("[TestReElection2A] pass 2")
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader. and the old leader
 	// should switch to follower.
 	cfg.connect(leader1)
 	leader2 := cfg.checkOneLeader()
+	lin_log.Info("[TestReElection2A] pass 3")
 
 	// if there's no quorum, no new leader should
 	// be elected.
@@ -78,14 +96,17 @@ func TestReElection2A(t *testing.T) {
 	// check that the one connected server
 	// does not think it is the leader.
 	cfg.checkNoLeader()
+	lin_log.Info("[TestReElection2A] pass 4")
 
 	// if a quorum arises, it should elect a leader.
 	cfg.connect((leader2 + 1) % servers)
 	cfg.checkOneLeader()
+	lin_log.Info("[TestReElection2A] pass 5")
 
 	// re-join of last node shouldn't prevent leader from existing.
 	cfg.connect(leader2)
 	cfg.checkOneLeader()
+	lin_log.Info("[TestReElection2A] pass 6")
 
 	cfg.end()
 }
@@ -108,6 +129,7 @@ func TestManyElections2A(t *testing.T) {
 		cfg.disconnect(i1)
 		cfg.disconnect(i2)
 		cfg.disconnect(i3)
+		lin_log.Warn("[TestManyElections2A] disconnect [%d,%d,%d]", i1, i2, i3)
 
 		// either the current leader should still be alive,
 		// or the remaining four should elect a new one.
@@ -116,6 +138,7 @@ func TestManyElections2A(t *testing.T) {
 		cfg.connect(i1)
 		cfg.connect(i2)
 		cfg.connect(i3)
+		lin_log.Warn("[TestManyElections2A] connect [%d,%d,%d]", i1, i2, i3)
 	}
 
 	cfg.checkOneLeader()

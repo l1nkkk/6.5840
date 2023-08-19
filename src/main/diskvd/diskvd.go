@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/l1nkkk/6.5840/diskv"
+	"github.com/l1nkkk/6.5840/src/diskv"
 )
 
 func usage() {

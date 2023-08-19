@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"6.5840/mr"
+	"github.com/l1nkkk/6.5840/src/mr"
 )
 
 // The map function is called once for each file of input.
